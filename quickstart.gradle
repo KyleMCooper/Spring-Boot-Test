@@ -1,0 +1,620 @@
+/**
+ * quickStart task, it can be removed if there's no intention to use that task
+ * Performs transformations on template project to create the code baseline for a given API
+ */
+
+import com.github.javaparser.StaticJavaParser
+import com.github.javaparser.ast.CompilationUnit
+import com.github.javaparser.ast.ImportDeclaration
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.MethodDeclaration
+import groovy.transform.Field
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.util.regex.Pattern
+
+import static groovy.io.FileType.DIRECTORIES
+import static groovy.io.FileType.FILES
+import static java.nio.file.Paths.get
+
+
+
+buildscript {
+    repositories {
+        maven {
+            url 'https://ci.te2.biz/artifactory/libs-release'
+            credentials{
+                username "ant"
+                password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+            }
+        }
+
+        maven {
+            credentials {
+                username "ant"
+                password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+            }
+            url "https://ci.te2.biz/artifactory/ivy-release-local"
+        }
+    }
+    dependencies {
+        classpath group: 'com.github.javaparser', name: 'javaparser-core', version: '3.14.13'
+    }
+    ext{
+        targetDataSource = this.properties['target']
+        defaultResource = this.properties['default_resource']
+        appName = this.properties['app_name']
+        packageName = this.properties['app_name']?.toLowerCase()
+        //Method names by endpoint
+        getMethodsMap = [service: ["get"], api: ["get"], repo: ["get"], dao: ["findById"]]
+        getAllMethodsMap = [service: ["getAll"], api: ["getAllPaged"], repo: ["getAll","getTotalCount"], dao: ["findAll", "count"]]
+        postMethodsMap = [service: ["create","validate${defaultResource}Creation"], api: ["create"], repo: ["create"], dao: ["insert"]]
+        putMethodsMap = [service: ["update"], api: ["update"], repo: ["update"], dao: ["update"]]
+        patchMethodsMap = [service: ["patch"], api: ["patch"], repo: ["patch"], dao: ["update"]]
+    }
+}
+
+static deleteFile(fileName) {
+    if (get(fileName).toFile().exists()) {
+        get(fileName).toFile().delete()
+    }
+}
+
+def deleteFileTree(folder, mask) {
+    delete fileTree(folder).matching {
+        include mask
+    }
+}
+
+static removeSuffixFromFolderNames(File sourceDir, String suffix) {
+    def directories = []
+    Pattern pattern = Pattern.compile(".*${suffix}\$")
+    println("Removing folder suffix: ${suffix}")
+    sourceDir.traverse(type: DIRECTORIES, nameFilter: pattern) {
+        if (it.name.contains(suffix)) {
+            //Remove temporary suffix
+            println "Folder ${it.name} will be renamed to " + it.getAbsolutePath().replace(suffix, '')
+            //Renaming can not be done while traversing the directory tree
+            directories << it
+        }
+    }
+    directories.each {
+        it.renameTo(it.getAbsolutePath().replace(suffix, ''))
+    }
+}
+/**
+ * Remove file name suffixes
+ * @param sourceDir Source Directory to traverse
+ * @param suffix suffix to be removed
+ * @param fileType file extension without dot
+ * @return
+ */
+static removeSuffixFromFileNames(File sourceDir, String suffix, String fileType) {
+    def dotExtension = ".${fileType}"
+    def fileNameSuffix = "${suffix}\\${dotExtension}"
+    Pattern pattern = Pattern.compile(".*${fileNameSuffix}\$")
+    println("Removing suffix: ${suffix}")
+    sourceDir.traverse(type: FILES, nameFilter: pattern) {
+        //Remove temporary suffix
+        println it.name + " will be renamed to " + it.getAbsolutePath().replaceFirst(fileNameSuffix, dotExtension)
+        //Renaming can not be done while traversing the directory tree
+        it.renameTo(it.getAbsolutePath().replaceFirst(fileNameSuffix, dotExtension))
+    }
+}
+/**
+ * Rename all files prefixed with prefix to replacement
+ * @param sourceDir
+ * @param prefix
+ * @param fileType
+ * @param replacement
+ * @return
+ */
+static renamePrefixedFileNames(File sourceDir, String prefix, String fileType, String replacement) {
+    def dotExtension = ".${fileType}"
+    def fileNameWithPrefix = "${prefix}.*\\${dotExtension}"
+    Pattern pattern = Pattern.compile(".*${fileNameWithPrefix}\$")
+    sourceDir.traverse(type: FILES, nameFilter: pattern) {
+        //Remove temporary suffix
+        println "Prefixed file ${it.name} will be renamed to " + it.getAbsolutePath().replaceFirst(prefix, "${replacement}")
+        //Renaming can not be done while traversing the directory tree
+        it.renameTo(it.getAbsolutePath().replaceFirst(prefix, "${replacement}"))
+    }
+}
+
+def replaceInFile(match, replacement, includes, dir = "src") {
+    ant.replaceregexp(match: match, replace: replacement, flags: 'g', byline: true) {
+        fileset(dir: dir, includes: includes)
+    }
+}
+
+/*
+* This task can be used to speed up the project setup.
+* Usage:
+*  gradle quickStart clean build -Ptarget=mybatis -Pquickstart=true -Pdefault_resource=Product -Papp_name=ProductAdmin
+* -Pquickstart is used to tell quickStart task to perform its intended transformations
+* -Ptarget is used to set the target datasource (mybatis or couchbase)
+* -Pdefault_resource is used to set the name of the default resource exposed in this API (for example: Product, Car, User, Customer).
+* -Papp_name is used to set the application name (for example: ProductAdmin, ClientAdmin, UserAdmin). It will be used to set the package names also (in lower case).
+* It performs the following actions(in the listed order):
+* - Rename all the classes named SkeletonResource* to the value passed in default_resource
+* - Rename all the classes named Skeleton* to the value passed in app_name
+* - Rename all the packages named skeleton to the lower case value of app_name
+* - Remove the files not required by target datasource
+* - In every step, replacements will be performed at code level to create a compilable version
+*
+* Example:
+* For Couchbase
+*  gradlew quickStart clean build -Ptarget=couchbase -Pquickstart=true -Pdefault_resource=Product -Papp_name=ProductAdmin --refresh-dependencies
+*  Please edit the application.properties file to set up the couchbase connection.
+*
+* For Mybatis:
+* gradlew quickStart clean build -Ptarget=mybatis -Pquickstart=true -Pdefault_resource=Product -Papp_name=ProductAdmin --refresh-dependencies
+*/
+task quickStart {
+    if (this.properties["quickstart"] == 'true') {
+        assert targetDataSource == 'couchbase' || targetDataSource == 'mybatis' || targetDataSource == 'none'
+
+        def groovySrcDir = new File('src')
+
+        //Before start, we remove the files not needed by target datasource
+        if (targetDataSource == 'mybatis') {
+            //Delete Couchbase specific classes
+            delete fileTree("src").matching {
+                include "**/*Couchbase.java"
+                include "**/*None.java"
+                include "**/junit/**/*.java"
+            }
+            //Not required directories cleanup
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/couchbase")
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/rules")
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/")
+
+            deleteFileTree("src/main/resources/tenantsCouchbase", "**/*.properties")
+            deleteFile("src/main/resources/tenantsCouchbase")
+
+            deleteFileTree("src/integrationTest/resources/tenantsCouchbase", "**/*.properties")
+            deleteFile("src/integrationTest/resources/tenantsCouchbase")
+
+            removeSuffixFromFolderNames(groovySrcDir, "Mybatis")
+            removeSuffixFromFileNames(groovySrcDir, "Mybatis", "java")
+
+            replaceInFile('DAOMybatis', 'DAO', '**/*.java')
+            replaceInFile('ProviderMybatis', 'Provider', '**/*.java')
+            replaceInFile('ImplMybatis', 'Impl', '**/*.java')
+            replaceInFile('TestsMybatis', 'Tests', '**/*.java')
+            replaceInFile('TestMybatis', 'Test', '**/*.java')
+            replaceInFile('ContextMybatis', 'Context', '**/*.java')
+            replaceInFile('.*//Couchbase line', '', '**/*.java')
+            replaceInFile('.*//Couchbase line', '', '**/*.properties')
+            replaceInFile('.*//Couchbase line', '', 'build.gradle', ".")
+            replaceInFile('.*//No datasource line', '', 'build.gradle', ".")
+            replaceInFile('//Mybatis line', '', 'build.gradle', ".")
+        } else if (targetDataSource == 'couchbase') {
+            //Delete Mybatis specific classes
+            delete fileTree("src").matching {
+                include "**/*Mybatis.java"
+                include "**/*None.java"
+            }
+            //Not required directories cleanup
+            deleteFile("src/main/java/com/accessofusion/skeleton/dao/sqlproviders")
+
+            deleteFileTree("src/main/resources/db", "**/*.sql")
+            deleteFile("src/main/resources/db")
+
+            deleteFileTree("src/integrationTest/resources/db", "*")
+            deleteFile("src/integrationTest/resources/db")
+
+            deleteFileTree("src/main/resources/tenantsMybatis", "**/*.properties")
+            deleteFile("src/main/resources/tenantsMybatis")
+
+            deleteFileTree("src/integrationTest/resources/tenantsMybatis", "**/*.properties")
+            deleteFile("src/integrationTest/resources/tenantsMybatis")
+            //Directory renaming (removing Couchbase suffix)
+            removeSuffixFromFolderNames(groovySrcDir, "Couchbase")
+            removeSuffixFromFileNames(groovySrcDir, "Couchbase", "java")
+            replaceInFile("DAOCouchbase", "DAO", "**/*.java")
+            replaceInFile('ImplCouchbase', 'Impl', '**/*.java')
+            replaceInFile('TestsCouchbase', 'Tests', '**/*.java')
+            replaceInFile('TestCouchbase', 'Test', '**/*.java')
+            replaceInFile('ContextCouchbase', 'Context', '**/*.java')
+            replaceInFile('.*//Mybatis line', '', '**/*.java')
+            replaceInFile('.*//Mybatis line', '', '**/*.properties')
+            replaceInFile('.*//Mybatis line', '', 'build.gradle', ".")
+            replaceInFile('.*//No datasource line', '', 'build.gradle', ".")
+            replaceInFile('//Couchbase line', '', '**/*.java')
+            replaceInFile('//Couchbase line', '', '**/*.properties')
+            replaceInFile('//Couchbase line', '', 'build.gradle', ".")
+        } else if (targetDataSource == 'none') {
+
+            //Delete Couchbase specific classes
+            delete fileTree("src") {
+                include "**/*Couchbase.java"
+                include "**/junit/**/*.java"
+                include "**/*Mybatis.java"
+            }
+            //Not required couchbase directories cleanup
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/couchbase")
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/rules")
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/junit/")
+
+            deleteFileTree("src/main/resources/tenantsCouchbase", "**/*.properties")
+            deleteFile("src/main/resources/tenantsCouchbase")
+
+            deleteFileTree("src/integrationTest/resources/tenantsCouchbase", "**/*.properties")
+            deleteFile("src/integrationTest/resources/tenantsCouchbase")
+
+            deleteFileTree("src/main/java/com/accessofusion/skeleton/datamodel", "**/*.java")
+            deleteFile("src/main/java/com/accessofusion/skeleton/datamodel")
+
+            deleteFileTree("src/main/java/com/accessofusion/skeleton/repository", "**/*.java")
+            deleteFile("src/main/java/com/accessofusion/skeleton/repository")
+
+            deleteFile("src/main/java/com/accessofusion/skeleton/dao/sqlproviders")
+            deleteFile("src/main/java/com/accessofusion/skeleton/dao")
+
+            //Delete default service
+            deleteFile("src/main/java/com/accessofusion/skeleton/service/SkeletonResourceService.java")
+
+            //Delete default service test
+            deleteFile("src/test/java/com/accessofusion/skeleton/service/SkeletonResourceServiceTest.java")
+            deleteFile("src/test/java/com/accessofusion/skeleton/repository")
+            //Not required mybatis directories cleanup
+            deleteFileTree("src/main/resources/db", "**/*.sql")
+            deleteFile("src/main/resources/db")
+
+            deleteFileTree("src/main/resources/tenantsMybatis", "**/*.properties")
+            deleteFile("src/main/resources/tenantsMybatis")
+
+            deleteFileTree("src/integrationTest/resources/tenantsMybatis", "**/*.properties")
+            deleteFile("src/integrationTest/resources/tenantsMybatis")
+
+            deleteFileTree("src/integrationTest/resources/db", "*")
+            deleteFile("src/integrationTest/resources/db")
+
+            deleteFileTree("src/integrationTest/java/com/accessofusion/skeleton/config/", "**/*.java")
+            deleteFile("src/integrationTest/java/com/accessofusion/skeleton/config/")
+
+            replaceInFile(".*//Couchbase line", "", "**/*.java")
+            replaceInFile(".*//Couchbase line", "", "**/*.properties")
+            replaceInFile(".*//Couchbase line", "", "build.gradle", ".")
+            replaceInFile(".*//Mybatis line", "", "**/*.java")
+            replaceInFile(".*//Mybatis line", "", "**/*.properties")
+            replaceInFile(".*//Mybatis line", "", "build.gradle", ".")
+            replaceInFile("//No datasource line", "", "build.gradle", ".")
+
+            //File renaming (removing No suffix)
+            removeSuffixFromFileNames(groovySrcDir, "None", "java")
+            replaceInFile('ServiceNone', 'Service', '**/*.java')
+            replaceInFile('TestNone', 'Test', '**/*.java')
+            replaceInFile('TestsNone', 'Tests', '**/*.java')
+            replaceInFile('ContextNone', 'Context', '**/*.java')
+        }
+
+        renamePrefixedFileNames(groovySrcDir, 'SkeletonResource', 'java', defaultResource)
+
+        ant.replaceregexp(match: 'SkeletonResource', replace: defaultResource, flags: 'g', byline: true) {
+            fileset(dir: 'src', includes: '**/*.java')
+            fileset(dir: 'src', includes: '**/*.feature')
+        }
+        ant.replaceregexp(match: 'SkeletonResource', replace: defaultResource, flags: 'g', byline: true) {
+            fileset(dir: 'src', includes: '**/*.java')
+            fileset(dir: 'src', includes: '**/*.feature')
+        }
+        ant.replaceregexp(match: 'skeletonResource', replace: defaultResource.substring(0, 1).toLowerCase() + defaultResource.substring(1), flags: 'g', byline: true) {
+            fileset(dir: 'src', includes: '**/*.java')
+            fileset(dir: 'src', includes: '**/*.sql')
+            fileset(dir: 'src', includes: '**/*.feature')
+        }
+        replaceInFile('SKELETON_RESOURCE', defaultResource.toUpperCase(), '**/*.java')
+        renamePrefixedFileNames(groovySrcDir, 'Skeleton', 'java', appName)
+        replaceInFile('Skeleton', appName, '**/*.java')
+        def packageList = []
+        groovySrcDir.traverse(type: DIRECTORIES, nameFilter: ~/skeleton$/) {
+            if (it.name == 'skeleton' && appName) {
+                //Replace with property app_name
+                println it.name + " will be renamed to " + it.getAbsolutePath().replace('skeleton', appName.toLowerCase())
+                //Directories are renamed after traversing the list to avoid file not found problems
+                packageList << it
+            }
+        }
+        packageList.each {
+            it.renameTo(it.getAbsolutePath().replace('skeleton', appName.toLowerCase()))
+        }
+        replaceInFile('skeleton', appName.toLowerCase(), '**/*.java')
+        replaceInFile('skeleton', appName.toLowerCase(), '**/*.properties')
+        replaceInFile('set-project-name-here', appName, 'settings.gradle', ".")
+        replaceInFile('set-project-name-here', appName, 'README.md', ".")
+    }
+}
+
+def resolveMethodsToRemove(removeGet, removeGetAll, removePost, removePut, removePatch, key) {
+    def methodsToRemove = []
+    if (key == "dao" || key == "repo") {
+        return methodsToRemove;
+    }
+    if (removeGet) {
+        methodsToRemove.addAll(getMethodsMap[key])
+    }
+    if (removeGetAll) {
+        methodsToRemove.addAll(getAllMethodsMap[key])
+    }
+    if (removePost) {
+        methodsToRemove.addAll(postMethodsMap[key])
+    }
+    if (removePut) {
+        methodsToRemove.addAll(putMethodsMap[key])
+    }
+    if (removePatch) {
+        methodsToRemove.addAll(patchMethodsMap[key])
+    }
+    return methodsToRemove
+}
+
+def resolveMethodsToRemoveForRepo(removeGet, removeGetAll, removePost, removePut, removePatch) {
+    def methodsToRemove = []
+    if (removeGet) {
+        methodsToRemove.addAll(getMethodsMap.repo)
+    }
+    if (removeGetAll) {
+        methodsToRemove.addAll(getAllMethodsMap.repo)
+    }
+    if (removePost) {
+        methodsToRemove.addAll(postMethodsMap.repo)
+    }
+    if (removePut) {
+        methodsToRemove.addAll(putMethodsMap.repo)
+    }
+    if (removePatch) {
+        methodsToRemove.addAll(patchMethodsMap.repo)
+    }
+    if (removePut && removePatch) {
+        methodsToRemove.addAll("applyUpdateOnRepository")
+    }
+    if (removeGet && removePut && removePatch) {
+        methodsToRemove.addAll("existsById")
+        methodsToRemove.addAll("findSkeletonResourceEntityById")
+    }
+    return methodsToRemove
+}
+
+def resolveMethodsToRemoveForDAO(removeGet, removeGetAll, removePost, removePut, removePatch) {
+    def methodsToRemove = []
+    if (removeGet) {
+        methodsToRemove.addAll(getMethodsMap.dao)
+    }
+    if (removeGetAll) {
+        methodsToRemove.addAll(getAllMethodsMap.dao)
+    }
+    if (removePost) {
+        methodsToRemove.addAll(postMethodsMap.dao)
+    }
+    if (removePut && removePatch) {
+        methodsToRemove.addAll(putMethodsMap.dao)
+    }
+    if (removeGet && removePut && removePatch) {
+        methodsToRemove.addAll("existsById")
+    }
+    return methodsToRemove
+}
+
+def removeMethodSourceNodes(sourceFile, methodsToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        compilationUnit.findAll(MethodDeclaration.class).each {
+            if (methodsToRemove.contains(it.getNameAsString())) {
+                println("Removing " + it.getNameAsString())
+                it.remove()
+            }
+        }
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+def removeTestMethodSourceNodes(sourceFile, methodsToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        compilationUnit.findAll(MethodDeclaration.class).each {
+            methodsToRemove.each { method ->
+                //The methods invoking ".method" will be removed
+                if (it.toString().contains("." + method)) {
+                    println("Removing test method: " + it.getNameAsString())
+                    it.remove()
+                }
+            }
+        }
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+def removeInnerInterfaceSourceNodes(sourceFile, interfaceToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        compilationUnit.findAll(ClassOrInterfaceDeclaration.class).each {
+            if (interfaceToRemove.equals(it.getNameAsString())) {
+                println("Removing " + it.getNameAsString())
+                it.remove()
+            }
+        }
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+def removeAnnotationSourceNodesConcrete(CompilationUnit compilationUnit, String annotationToRemove, boolean includeMembers = false) {
+    compilationUnit.findAll(ClassOrInterfaceDeclaration.class).each {
+        def toRemove = []
+        it.getAnnotations().each { ann ->
+            if (ann.toString().contains(annotationToRemove)) {
+                println("Removing annotation from body: ${ann}")
+                toRemove << ann
+            }
+        }
+        toRemove.each { it.remove() }
+        if (includeMembers) {
+            toRemove = []
+            it.getMembers().each { member ->
+                member.getAnnotations().each { memberAnn ->
+                    if (memberAnn.toString().contains(annotationToRemove)) {
+                        println("Removing annotation from body: ${memberAnn}")
+                        toRemove << memberAnn
+                    }
+                }
+            }
+            toRemove.each { it.remove() }
+        }
+    }
+}
+
+def removeAnnotationSourceNodes(sourceFile, String annotationToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        removeAnnotationSourceNodesConcrete(compilationUnit, annotationToRemove)
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+/**
+ * Remove code appearances
+ * Example: CreateValidationGroup.class, PatchValidationGroup.class
+ * if source == PatchValidationGroup.class
+ * it will remove any "PatchValidationGroup.class," ", PatchValidationGroup.class" "PatchValidationGroup.class"
+ * @param source
+ * @param usage
+ * @return
+ */
+static String removeCodeUsagesInAnnotations(String source, String usage) {
+    return source.replaceAll(",?\\s+groups\\s?=\\s?\\{\\s?${usage}\\s?\\}", "").replaceAll(",?\\s?groups\\s?=\\s?${usage}", "").replaceAll(",\\s?${usage}", "").replaceAll("${usage},\\s?", "").replace(usage, "")
+}
+
+def removeUsageWithinAnnotationSourceNodes(sourceFile, usageToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+
+        Files.write(sourceFile, removeCodeUsagesInAnnotations(compilationUnit.toString(), usageToRemove).getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+def removeJavaxAnnotations(sourceFile) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        def toRemove = []
+        compilationUnit.findAll(ImportDeclaration.class).each {
+            if (it.toString().contains("javax.validation.constraints")) {
+                println("Removing javax import from body: " + it.getName())
+                toRemove << it
+            }
+        }
+        toRemove.each {
+            String[] javaxAnnotation = it.getName().asString().split("\\.")
+            it.remove()
+            removeAnnotationSourceNodesConcrete(compilationUnit, javaxAnnotation[javaxAnnotation.length - 1], true)
+        }
+
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+def removeImportsFromSourceNodes(sourceFile, importsToRemove) {
+    if (sourceFile.toFile().exists()) {
+        CompilationUnit compilationUnit = StaticJavaParser.parse(sourceFile.toAbsolutePath())
+        compilationUnit.findAll(ImportDeclaration.class).each {
+            def toRemove = []
+            importsToRemove.each { imp ->
+                if (it.toString().contains(imp)) {
+                    println("Removing import from body: " + it)
+                    toRemove << it
+                }
+            }
+            toRemove.each { it.remove() }
+
+        }
+
+        Files.write(sourceFile, compilationUnit.toString().getBytes(StandardCharsets.UTF_8))
+    }
+}
+
+task customizeFirstVersion {
+    if (this.properties["quickstart"] == 'true') {
+        def removeGet = this.properties['with_get'] == "false";
+        def removeGetAll = this.properties['with_get_all'] == "false";
+        def removePost = this.properties['with_post'] == "false";
+        def removePut = this.properties['with_put'] == "false";
+        def removePatch = this.properties['with_patch'] == "false";
+
+        if (removeGet || removeGetAll || removePost || removePut || removePatch) {
+            // Methods to be removed for the required configuration
+            def methodsToRemove = []
+            // Variables to be removed for the required configuration
+            def variablesToRemove = []
+            // Comments to be removed for the required configuration
+            def commentsToRemove = []
+
+            methodsToRemove = resolveMethodsToRemove(removeGet, removeGetAll, removePost, removePut, removePatch, "service")
+            def serviceSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/service/${defaultResource}Service.java")
+
+            removeMethodSourceNodes(serviceSourceFile, methodsToRemove)
+            def apiSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/api/${defaultResource}Api.java")
+            methodsToRemove = resolveMethodsToRemove(removeGet, removeGetAll, removePost, removePut, removePatch, "api")
+            removeMethodSourceNodes(apiSourceFile, methodsToRemove)
+            def serviceTestSourceFile = get("${projectDir}/src/test/java/com/accessofusion/${packageName}/service/${defaultResource}ServiceTest.java")
+            removeTestMethodSourceNodes(serviceTestSourceFile, methodsToRemove)
+            def integrationTestSourceFile = get("${projectDir}/src/integrationTest/java/com/accessofusion/${packageName}/steps/${defaultResource}StepDefs.java")
+            removeTestMethodSourceNodes(integrationTestSourceFile, methodsToRemove)
+            def controllerSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/controller/${defaultResource}Controller.java")
+            removeMethodSourceNodes(controllerSourceFile, methodsToRemove)
+
+            if (targetDataSource != "none") {
+                //Edit the datasource interaction classes
+                methodsToRemove = resolveMethodsToRemoveForRepo(removeGet, removeGetAll, removePost, removePut, removePatch)
+                def repoSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/repository/${defaultResource}Repository.java")
+                removeMethodSourceNodes(repoSourceFile, methodsToRemove)
+                def repoTestSourceFile = get("${projectDir}/src/test/java/com/accessofusion/${packageName}/repository/${defaultResource}RepositoryTest.java")
+                removeTestMethodSourceNodes(repoTestSourceFile, methodsToRemove)
+                def repoImplSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/repository/${defaultResource}RepositoryImpl.java")
+                removeMethodSourceNodes(repoImplSourceFile, methodsToRemove)
+                if (targetDataSource == "mybatis") {
+                    methodsToRemove = resolveMethodsToRemoveForDAO(removeGet, removeGetAll, removePost, removePut, removePatch)
+                    def daoSourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/dao/${defaultResource}DAO.java")
+                    removeMethodSourceNodes(daoSourceFile, methodsToRemove)
+                }
+                //Note: There's no need to edit the couchbase DAO as it is implemented using Spring Data repositories
+            }
+
+            //Final editions for javax validation
+            if (removePost && removePut) {
+                def validatorGroupsFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/ValidatorGroups.java")
+                removeInnerInterfaceSourceNodes(validatorGroupsFile, "CreateValidationGroup")
+                def resourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/domainmodel/${defaultResource}.java")
+                removeUsageWithinAnnotationSourceNodes(resourceFile, "CreateValidationGroup\\.class")
+                removeImportsFromSourceNodes(resourceFile, ["CreateValidationGroup"])
+                removeImportsFromSourceNodes(apiSourceFile, ["CreateValidationGroup"])
+            }
+            if (removePatch) {
+                deleteFile("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/PatchValidator.java")
+                deleteFile("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/PatchRequestIsValidConstraint.java")
+                deleteFile("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/custom/${defaultResource}PatchValidator.java")
+                deleteFile("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/custom")
+                def validatorGroupsFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/ValidatorGroups.java")
+                removeInnerInterfaceSourceNodes(validatorGroupsFile, "PatchValidationGroup")
+                def resourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/domainmodel/${defaultResource}.java")
+                removeAnnotationSourceNodes(resourceFile, "PatchRequestIsValidConstraint")
+                removeUsageWithinAnnotationSourceNodes(resourceFile, "PatchValidationGroup\\.class")
+                removeImportsFromSourceNodes(resourceFile, ["PatchRequestIsValidConstraint", "PatchValidationGroup", "${defaultResource}PatchValidator"])
+                removeImportsFromSourceNodes(apiSourceFile, ["PatchValidationGroup"])
+            }
+
+            if (removePost && removePut && removePatch) {
+                //No validation groups required
+                deleteFile("${projectDir}/src/main/java/com/accessofusion/${packageName}/validator/ValidatorGroups.java")
+                //We can assume that this API will be read only so validations won't be performed on Domain class
+                def resourceFile = get("${projectDir}/src/main/java/com/accessofusion/${packageName}/domainmodel/${defaultResource}.java")
+                removeJavaxAnnotations(resourceFile)
+                removeImportsFromSourceNodes(resourceFile, ["ErrorMessages"])
+            }
+            //Clean files not required any more
+            deleteFile("quickStart.gradle")
+            deleteFile("template-README.md")
+            replaceInFile("apply from: 'quickstart.gradle'", '', 'build.gradle', ".")
+        }
+    }
+}

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ /**
+  ~  * (C) 2019 Accesso Technology Group, plc. All Rights Reserved.
+  ~  */
+  -->
+<configuration debug="true" scan="true" scanPeriod="60 minutes">
+  <springProperty scope="context" name="loggingFormat" source="app.logging.format"/>
+  <springProperty scope="context" name="LOG_PATH" source="app.logging.path"/>
+
+  <property name="LOG_ARCHIVE" value="archive"/>
+  <appender class="ch.qos.logback.core.ConsoleAppender" name="Console-Appender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss} - %-5level [${HOSTNAME}] - [%thread] - %logger{12} - %msg%n
+      </pattern>
+    </encoder>
+  </appender>
+
+  <appender class="ch.qos.logback.core.rolling.RollingFileAppender" name="RollingFile-Appender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss} - %-5level [${HOSTNAME}] - [%thread] - %logger{12} - %msg%n
+      </pattern>
+    </encoder>
+    <file>${LOG_PATH}/service.log</file>
+
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>
+        ${LOG_PATH}/${LOG_ARCHIVE}/%d{yyyyMMdd}/service.log
+      </fileNamePattern>
+      <maxHistory>30</maxHistory>
+    </rollingPolicy>
+  </appender>
+
+  <appender class="ch.qos.logback.classic.AsyncAppender" name="Async-Appender">
+    <appender-ref ref="RollingFile-Appender"/>
+  </appender>
+
+  <logger additivity="false" level="debug" name="com.accessofusion">
+    <appender-ref ref="Async-Appender"/>
+  </logger>
+
+  <logger additivity="false" level="error" name="org.apache">
+    <appender-ref ref="Async-Appender"/>
+  </logger>
+
+  <!--Preserve this line to show when the application port becomes available-->
+  <logger level="info" name="org.springframework.boot.web.embedded.tomcat.TomcatWebServer">
+    <appender-ref ref="Console-Appender"/>
+  </logger>
+
+  <!--For couchbase this can be used to show the queries in the log for debugging purposes. Set the level to debug if required-->
+  <logger level="error" name="org.springframework.data.couchbase.repository.query">
+    <appender-ref ref="Async-Appender"/>
+  </logger>
+
+  <root level="debug">
+    <!--appender-ref ref="Console-Appender"/-->
+    <appender-ref ref="Async-Appender"/>
+  </root>
+
+</configuration>

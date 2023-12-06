@@ -1,0 +1,237 @@
+buildscript {
+    ext {
+        /**
+         * Add any relevant properties for gradle here.
+         */
+    }
+    repositories {
+        maven {
+            url 'https://ci.te2.biz/artifactory/libs-release'
+            credentials{
+                username "ant"
+                password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+            }
+        }
+
+        maven {
+            credentials {
+                username "ant"
+                password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+            }
+            url "https://ci.te2.biz/artifactory/ivy-release-local"
+        }
+    }
+    dependencies {
+        classpath "org.ajoberstar:gradle-imports:1.0.3"
+    }
+}
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.1.0'
+    /**
+     * Used to allow execution of nodejs tasks from Gradle
+     */
+    id "com.moowork.node" version "1.3.1"
+    /**
+     * Google java format
+     * spotless is being used as substitute of com.github.sherter.google-java-format:0.8
+     */
+    id 'com.diffplug.spotless' version '6.21.0'
+    /**
+     * For code coverage reports with Jacoco
+     */
+    id 'jacoco'
+    /**
+     * Gradle IDEA integration
+     * https://docs.gradle.org/current/userguide/idea_plugin.html
+     */
+    id 'idea'
+    /**
+     * Gradle Eclipse integration
+     * https://docs.gradle.org/current/userguide/eclipse_plugin.html
+     */
+    id 'eclipse'
+    /**
+     * PMD integration
+     */
+    id 'pmd'
+}
+
+apply plugin: "io.spring.dependency-management"
+//Apply the plugin to organize unused imports (the task organizeImports still needs to be passed in the command line)
+apply plugin: "org.ajoberstar.organize-imports"
+
+group 'com.accessofusion'
+version '2.0.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+jacoco {
+    toolVersion = "0.8.9"
+}
+
+spotless {
+    java {
+    }
+}
+
+repositories {
+    maven {
+        url 'https://ci.te2.biz/artifactory/libs-release'
+        credentials{
+            username "ant"
+            password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+        }
+    }
+
+    maven {
+        credentials {
+            username "ant"
+            password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+        }
+        url "https://ci.te2.biz/artifactory/ivy-release-local"
+    }
+
+    maven {
+        url 'https://ci.te2.biz/artifactory/libs-snapshot'
+        credentials{
+            username "ant"
+            password "AKCp8hzD9JNu7LuDA3ECZB76zXhA8kxgV32CY5fBg5VfPrmVoDYWDt4kMin76mdRineUrivg1"
+        }
+    }
+
+    maven {
+        url "https://packages.confluent.io/maven/"
+    }
+}
+
+/**
+ * Declaring a dedicated source set for integration tests
+ */
+sourceSets {
+    integrationTest {
+    }
+}
+
+/**
+ * The next block is intended to refresh dependencies when using snapshots.
+ * If this is not required you can comment it without problem.
+ */
+configurations.all {
+    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+    // TODO: Uncomment below if targetDataSource == 'couchbase' OR targetDataSource == 'none'
+    //exclude group: 'org.springframework.boot', module: 'spring-boot-starter-jdbc'
+}
+
+dependencies {
+    implementation('com.accessofusion:microservices-parent-bom:2.0.0-SNAPSHOT')//No datasource line
+    implementation('com.accessofusion:spring-microservices-mybatis-bom:2.0.0-SNAPSHOT')//Mybatis line
+    implementation('com.accessofusion:spring-microservices-couchbase-bom:2.0.0-SNAPSHOT')//Couchbase line
+    implementation('org.springframework.boot:spring-boot-starter-validation')
+    implementation('org.zalando:problem-spring-web-starter:0.29.1')
+    implementation('jakarta.validation:jakarta.validation-api:3.0.2')
+    runtimeOnly 'com.h2database:h2'//TODO: remove if h2 not required //Mybatis line
+    testImplementation('org.springframework.boot:spring-boot-starter-test')
+    testImplementation 'junit:junit'
+    compileOnly 'org.projectlombok:lombok:1.18.28'
+    annotationProcessor 'org.projectlombok:lombok:1.18.28'
+    integrationTestImplementation(sourceSets.main.output)
+    integrationTestImplementation('com.accessofusion:spring-microservices-integration-base-bom:2.0.0-SNAPSHOT')//No datasource line
+    integrationTestImplementation('com.accessofusion:spring-microservices-integration-mybatis-bom:2.0.0-SNAPSHOT')//Mybatis line
+    integrationTestImplementation('com.accessofusion:spring-microservices-integration-couchbase-bom:2.0.0-SNAPSHOT')//Couchbase line
+    integrationTestImplementation('org.springframework.boot:spring-boot-starter-validation')
+    integrationTestImplementation('org.zalando:problem-spring-web-starter:0.29.1')
+    integrationTestImplementation('jakarta.validation:jakarta.validation-api:3.0.2')
+}
+
+
+/**
+ * Used to generate the build information that can be used to automatically add the service version to swagger docs.
+ */
+springBoot {
+    buildInfo()
+}
+
+/**
+ * Task to execute integration tests easily from Gradle (See Readme)
+ */
+task integrationTests(type: Test) {
+	group = 'verification'
+    description = 'Runs the integration tests'
+    testClassesDirs = files(sourceSets.integrationTest.output.classesDirs)
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    exclude '**/TestContext.class'
+    testLogging {
+        outputs.upToDateWhen { false }
+        showStandardStreams = true
+    }
+    systemProperty 'use_container_for_tests', 'true'//Couchbase line
+    //TODO: Verify if the image tag to be used for integration tests with TestContainers or remove this comment if the version is ok for your requirements
+    //Container tag used to specify the image to be used for integration testing
+    systemProperty 'integration_image_tag', 'mysql:5.6.38'//Mybatis line
+    systemProperty 'integration_image_tag', 'couchbase:community-7.2.0'//Couchbase line
+}
+// Allow the sourceset to be included in Eclipse
+project.configurations.getByName("integrationTestImplementation").setCanBeResolved(true)
+eclipse.classpath.plusConfigurations << configurations.integrationTestImplementation
+
+/**
+ * System property required. The "test" used to generate the swagger.json file will use this folder.
+ */
+test {
+    systemProperty 'staticjson.outputDir', file("${projectDir}/swagger")
+}
+
+/**
+ * Installs the API spec converter
+ */
+task installApiSpecConverter(type: NpmTask) {
+    args = ['install', 'api-spec-converter', '--save-dev']
+}
+
+/**
+ * Uses api-spec-converter to transform from swagger 2 to OAS 3 (Postman Friendly / AWS Gateway friendly)
+ * The task requires that swagger.json file is present on swagger folder
+ */
+task convertSwaggerToOas3(type: NodeTask) {
+	group = 'documentation'
+    description = 'Converts the swagger/swagger.json file to OAS3 format'
+    dependsOn installApiSpecConverter
+    script = file('swagger/convert_to_oas3.js')
+}
+/**
+ * Jacoco Task for integration tests. It will join the results of both unit tests and integration tests in one single report
+ */
+task jacocoIntegrationTestReport(type: JacocoReport) {
+    executionData "${buildDir}/jacoco/integrationTests.exec"
+    executionData "${buildDir}/jacoco/test.exec"
+    classDirectories = files("${buildDir}/classes/java/main")
+    sourceDirectories = files("src/main/java")
+}
+
+/**
+ * Execute task when integration tests end
+ */
+integrationTests.finalizedBy jacocoIntegrationTestReport
+
+/**
+ * PMD static analysis
+ * */
+pmd {
+    if(file("backend_jenkins/PMD/spring_rules.xml").exists()) {
+        ruleSetFiles file("backend_jenkins/PMD/spring_rules.xml")
+    } else {
+        // PMD ruleset isn't found - just run it against a basic ruleset
+        ruleSets = ['java-basic']
+    }
+    sourceSets = [sourceSets.main, sourceSets.test]
+    ignoreFailures = true
+    reportsDir file("PMD/reports")
+}
+
+apply from: 'quickstart.gradle'
